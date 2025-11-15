@@ -1,112 +1,145 @@
+"""
+Unified interface for steady-state groundwater flow solvers.
+
+Provides:
+ - Direct solver (LU)
+ - SOR iterative solver
+ - Unified result dictionary for AquiferModel and API
+
+References:
+  - Todd & Mays (2005) Groundwater Hydrology
+  - USBR Ground Water Manual (1995)
+"""
+
+from __future__ import annotations
 import numpy as np
 
-from .assemble_matrix import assemble_matrix
-from .solver_direct import solve_direct
-from .solver_iterative import solve_iterative
+from backend.solvers.steady_state.assemble_matrix import assemble_matrix
+from backend.solvers.steady_state.solver_direct import solve_direct
+from backend.solvers.steady_state.solver_iterative import solve_iterative
+from backend.utils.logging import log_solver_start, log_solver_result
 
 
-def solve_steady_state(
-    model,
-    method="direct",
-    max_outer_iter=20,
-    max_inner_iter=3000,
-    tol_head=1e-4,
-    tol_inner=1e-6,
-    w=1.4,
-    verbose=False
-):
+class SteadyStateSolver:
     """
-    Unified solver for steady-state confined + unconfined groundwater flow.
-
-    Outer loop:
-        - updates saturated thickness (unconfined BCF method)
-        - assembles matrix A and RHS vector b
-        - solves Ah = b with selected method
-
-    Supported methods:
-        - "direct"   → sparse direct solver (spsolve)
-        - "sor"      → Gauss–Seidel / SOR
-
-    Parameters:
-        model : AquiferModel
-        method : "direct" or "sor"
-        max_outer_iter : limit on unconfined outer iterations
-        max_inner_iter : limit on linear solver iterations for SOR
-        tol_head : tolerance for outer head convergence
-        tol_inner : tolerance for inner solver iterations
-        w : relaxation factor for SOR
-        verbose : print solver output
-
-    Returns:
-        head : 2D array (nx, ny)
-        outer_iters : number of outer iterations
-        inner_info : data about inner solver (iterations, convergence)
-        converged : bool
+    High-level steady-state solver wrapper.
+    Supports: method = "direct" or "sor"
     """
 
-    grid = model.grid
-    nx, ny = grid.nx, grid.ny
+    # ------------------------------------------------------------------
+    #  MAIN SOLVER ENTRY POINT
+    # ------------------------------------------------------------------
+    def solve(self, model, method: str = "direct") -> dict:
+        """
+        Solve the steady-state saturated flow equation using
+        a matrix-based finite-difference approach.
 
-    # initial guess — flat head field, set to first constant-head boundary if available
-    head_prev = _initial_head_guess(model, nx, ny)
+        Returns:
+            {
+                "converged": bool,
+                "iterations": int | None,
+                "method": str,
+                "head": np.ndarray,
+                "residual_norm": float,
+                "notes": str
+            }
+        """
 
-    for outer in range(max_outer_iter):
-
-        # Assemble matrix with current saturated thickness from head_prev
-        A, b = assemble_matrix(model, head_prev)
-
-        # Select solver
-        if method.lower() == "direct":
-            head_new = solve_direct(A, b, nx, ny)
-            inner_info = {"iters": 1, "converged": True}
-
-        elif method.lower() in ("sor", "gs", "gauss-seidel"):
-            head_new, iters, ok = solve_iterative(
-                A, b, nx, ny, w=w,
-                max_iter=max_inner_iter,
-                tol=tol_inner,
-                verbose=verbose
-            )
-            inner_info = {"iters": iters, "converged": ok}
-
-        else:
+        method = method.lower()
+        if method not in ("direct", "sor"):
             raise ValueError(f"Unknown solver method: {method}")
 
-        # Outer loop convergence check (head stabilization)
-        diff = np.max(np.abs(head_new - head_prev))
+        log_solver_start(f"Running steady-state solver ({method})")
 
-        if verbose:
-            print(f"[Outer {outer+1}] Head change = {diff:.6e}")
+        # Initial head guess based on average constant-head BCs
+        nx, ny = model.grid.nx, model.grid.ny
+        head_prev = self._initial_head_guess(model, nx, ny)
 
-        if diff < tol_head:
-            return head_new, outer + 1, inner_info, True
+        max_outer_iter = 20
+        tol_outer = 1e-4
 
-        # Prepare for next iteration
-        head_prev = head_new.copy()
+        iterations = None
+        converged = False
+        notes = ""
+        residual = 0.0
 
-    # Did not converge
-    return head_new, max_outer_iter, inner_info, False
+        # ==================================================================
+        #  OUTER LOOP — FOR UNCONFINED ITERATION (BCF METHOD)
+        # ==================================================================
+        for outer in range(max_outer_iter):
 
+            # Assemble matrix using current head estimate
+            A, b, grid_shape = assemble_matrix(model, head_prev)
+            nx, ny = grid_shape
 
-# ---------------------------------------------------
-# Helpers
-# ---------------------------------------------------
+            # --------------------------------------------------------------
+            # SELECT NUMERICAL SOLVER
+            # --------------------------------------------------------------
+            if method == "direct":
+                # Direct solver returns a full (nx, ny) head array
+                head_new = solve_direct(A, b, nx, ny)
+                residual = 0.0
+                iterations = None
+                converged_inner = True
+                notes = "Direct LU decomposition completed."
 
-def _initial_head_guess(model, nx, ny):
-    """
-    Create an initial head field.
-    1. If constant-head boundaries exist → use their average for initialization.
-    2. Else → uniform head = 10.
+            else:  # SOR iterative solver
+                # solve_iterative returns (head_2D, iterations, converged)
+                head_new, iterations, converged_inner = solve_iterative(
+                    A, b, nx, ny
+                )
 
-    Returns:
-        head[nx, ny]
-    """
-    head = np.ones((nx, ny)) * 10.0
+                # compute a residual for reporting
+                residual = np.linalg.norm(A @ head_new.flatten() - b)
 
-    ch_values = [bc["value"] for bc in model.boundaries if bc["type"] == "CONSTANT_HEAD"]
+                notes = "SOR iteration completed."
 
-    if len(ch_values) > 0:
-        avg = sum(ch_values) / len(ch_values)
-        head[:] = avg
+            # --------------------------------------------------------------
+            # OUTER LOOP CONVERGENCE CHECK (BCF method)
+            # --------------------------------------------------------------
+            diff = np.max(np.abs(head_new - head_prev))
 
-    return head
+            if diff < tol_outer:
+                converged = True
+                head_final = head_new
+                break
+
+            head_prev = head_new.copy()
+
+        else:
+            # OUTER LOOP DID NOT CONVERGE
+            converged = False
+            head_final = head_new
+
+        # ==================================================================
+        #  BUILD RETURN DICTIONARY
+        # ==================================================================
+        result = {
+            "converged": bool(converged),
+            "iterations": iterations,
+            "method": method,
+            "head": head_final,
+            "residual_norm": float(residual),
+            "notes": notes,
+        }
+
+        log_solver_result(result)
+        return result
+
+    # ------------------------------------------------------------------
+    #  INITIAL GUESS FOR HEAD FIELD
+    # ------------------------------------------------------------------
+    def _initial_head_guess(self, model, nx, ny):
+        """Initialize head with average constant-head boundary or 10 ft."""
+        head = np.ones((nx, ny)) * 10.0
+
+        ch_values = [
+            bc["value"]
+            for bc in model.boundaries
+            if bc["type"] == "CONSTANT_HEAD"
+        ]
+
+        if ch_values:
+            head[:] = sum(ch_values) / len(ch_values)
+
+        return head
