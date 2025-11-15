@@ -1,6 +1,7 @@
 import numpy as np
-from core.grid import Grid
-from core.properties import AquiferProperties
+from backend.core.grid import Grid
+from backend.core.properties import AquiferProperties
+
 
 dx = np.array([10, 20, 30])
 dy = np.array([10, 10])

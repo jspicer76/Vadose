@@ -143,3 +143,15 @@ class SteadyStateSolver:
             head[:] = sum(ch_values) / len(ch_values)
 
         return head
+
+
+# ======================================================================
+#  PUBLIC FUNCTION EXPECTED BY TEST SUITE
+# ======================================================================
+
+def solve_steady_state(model, method="direct"):
+    """
+    Simple wrapper function used by tests and API.
+    """
+    solver = SteadyStateSolver()
+    return solver.solve(model, method)
