@@ -1,3 +1,7 @@
+from dataclasses import dataclass, field
+from .grid import Grid
+from .properties import AquiferProperties
+from .well import Well
 @dataclass
 class AquiferModel:
     name: str
