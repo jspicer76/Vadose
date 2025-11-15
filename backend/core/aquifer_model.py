@@ -1,33 +1,20 @@
-from dataclasses import dataclass, field
-from typing import List, Optional
-
-from .grid import ModelGrid
-from .layers import Layer
-from .wells import Well
-from .boundaries import BoundaryCondition
-from .parameters import SolverParameters
-
-
 @dataclass
 class AquiferModel:
-    """
-    Top-level container for all groundwater model data.
-
-    This is what steady-state and transient solvers will operate on.
-    """
     name: str
-    grid: ModelGrid
-    layers: List[Layer] = field(default_factory=list)
-    wells: List[Well] = field(default_factory=list)
-    boundaries: List[BoundaryCondition] = field(default_factory=list)
-    solver_params: SolverParameters = field(default_factory=SolverParameters)
+    grid: Grid
+    properties: AquiferProperties
+    wells: list = field(default_factory=list)
+    boundaries: list = field(default_factory=list)
 
-    def summary(self) -> str:
-        """Return a short text summary of the model for debugging."""
-        return (
-            f"AquiferModel(name={self.name!r}, "
-            f"cells={self.grid.n_cells()}, "
-            f"layers={len(self.layers)}, "
-            f"wells={len(self.wells)}, "
-            f"boundaries={len(self.boundaries)})"
-        )
+    def transmissivity_tensor(self, i, j, k=0):
+        """Return (Tx,Ty) tuple for a cell."""
+        Tx = self.properties.transmissivity_x(k, i, j)
+        Ty = self.properties.transmissivity_y(k, i, j)
+        return Tx, Ty
+
+    def storage(self, i, j, k=0):
+        """Return storage coefficient depending on aquifer type."""
+        if self.properties.confined:
+            return self.properties.Ss[k] * self.properties.thickness[k]
+        else:
+            return self.properties.Sy[k]
