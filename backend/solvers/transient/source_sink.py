@@ -1,86 +1,127 @@
 # backend/solvers/transient/source_sink.py
 
+from __future__ import annotations
+
+from typing import List, Tuple, Any
 import numpy as np
+
+from .pumping_schedule import PumpingSchedule, make_schedule
 
 
 class SourceSink:
     """
-    Builds volumetric source/sink flux fields (per unit area)
-    for the transient groundwater solver.
+    Builds the right-hand-side (RHS) vector for the transient system,
+    accounting for wells (Q(t)) and, later, time-varying recharge.
 
-    - Wells:      Q [L^3/T] → q = Q / Area  [L/T]
-    - Recharge:   R(x,y,t) already in flux form [L/T]
-
-    Positive flux  = injection / recharge
-    Negative flux  = extraction (pumping)
+    Assumptions about the model:
+      - model.grid has:
+          * num_cells (int)
+          * cell_index(row, col) -> flat index
+      - model.wells is a list of well objects or dicts.
+        Each well provides:
+          * row/col or i/j (zero-based indices)
+          * Q or q  (base pumping rate)
+          * optional 'schedule' config:
+              - attribute .schedule (object or dict), or
+              - key 'schedule' when well is a dict.
     """
 
-    def __init__(self, model):
+    def __init__(self, model: Any):
         self.model = model
+        self.grid = model.grid
+        self.n = self.grid.num_cells
+
+        # List of (cell_index, schedule) pairs
+        self._well_schedules: List[Tuple[int, PumpingSchedule]] = []
+
+        self._build_well_schedules()
+        # Recharge schedules could be added later in the same pattern
 
     # ------------------------------------------------------------------
-    # Wells contribution
+    # Internal helpers
     # ------------------------------------------------------------------
-    def wells_flux(self, t):
-        """
-        Returns wells as flux per unit area (L/T),
-        shape = (nx, ny).
-        """
-        model = self.model
-        W = np.zeros((model.nx, model.ny), dtype=float)
+    def _build_well_schedules(self) -> None:
+        """Prepare (index, schedule) pairs for all wells in the model."""
+        self._well_schedules.clear()
 
-        if not model.wells:
-            return W
+        wells = getattr(self.model, "wells", []) or []
 
-        cell_area = model.dx * model.dy
+        for w in wells:
+            # --- row / col -------------------------------------------------
+            row = None
+            col = None
 
-        for well in model.wells:
-            i, j = well.cell
-            # Q is volumetric rate (m³/s or ft³/s)
-            # Convert to flux per unit area
-            W[i, j] += -well.Q / cell_area   # pumping is negative
+            # Object-style wells
+            if hasattr(w, "row"):
+                row = getattr(w, "row")
+            elif hasattr(w, "i"):
+                row = getattr(w, "i")
 
-        return W
+            if hasattr(w, "col"):
+                col = getattr(w, "col")
+            elif hasattr(w, "j"):
+                col = getattr(w, "j")
+
+            # Dict-style wells as fallback
+            if (row is None or col is None) and isinstance(w, dict):
+                row = w.get("row", w.get("i"))
+                col = w.get("col", w.get("j"))
+
+            # Skip if we still don't have valid indices
+            if row is None or col is None:
+                # You could log a warning here if desired
+                continue
+
+            # --- base Q ----------------------------------------------------
+            base_q = None
+            if hasattr(w, "Q"):
+                base_q = getattr(w, "Q")
+            elif hasattr(w, "q"):
+                base_q = getattr(w, "q")
+            elif isinstance(w, dict):
+                base_q = w.get("Q", w.get("q", 0.0))
+
+            if base_q is None:
+                base_q = 0.0
+
+            # --- schedule config -------------------------------------------
+            schedule_cfg = None
+            if hasattr(w, "schedule"):
+                schedule_cfg = getattr(w, "schedule")
+            elif isinstance(w, dict):
+                schedule_cfg = w.get("schedule")
+
+            # If schedule_cfg is already a PumpingSchedule, keep it
+            if isinstance(schedule_cfg, PumpingSchedule.__constraints__ if hasattr(PumpingSchedule, "__constraints__") else ()):  # type: ignore
+                schedule = schedule_cfg  # not typical branch; left for completeness
+            else:
+                # Expect config dict; factory will fall back to constant if None/invalid
+                schedule = make_schedule(
+                    config=schedule_cfg if isinstance(schedule_cfg, dict) else None,
+                    default_q=float(base_q),
+                )
+
+            # --- map to global cell index ----------------------------------
+            cell_idx = self.grid.cell_index(int(row), int(col))
+
+            self._well_schedules.append((cell_idx, schedule))
 
     # ------------------------------------------------------------------
-    # Recharge contribution
+    # Public API
     # ------------------------------------------------------------------
-    def recharge_flux(self, t):
+    def vector_at_time(self, t: float) -> np.ndarray:
         """
-        Returns recharge field [L/T], shape = (nx, ny).
+        Return the RHS vector f(t) from wells at time t.
 
-        Uses TransientModel.get_recharge_field(t) which supports:
-          - scalar
-          - 2D array
-          - flat array
-          - callable(t)
+        Sign convention:
+          - Use your model's convention (typically negative for pumping).
         """
-        R = self.model.get_recharge_field(t)
-        if R is None:
-            return np.zeros((self.model.nx, self.model.ny), dtype=float)
+        rhs = np.zeros(self.n, dtype=float)
 
-        return R.astype(float)
+        # Wells
+        for idx, schedule in self._well_schedules:
+            rhs[idx] += schedule(t)
 
-    # ------------------------------------------------------------------
-    # Combined W-field
-    # ------------------------------------------------------------------
-    def combined_flux(self, t):
-        """
-        Returns full W-field: wells + recharge, flux per area [L/T].
-        Equivalent to MODFLOW "source term".
-        """
-        return self.wells_flux(t) + self.recharge_flux(t)
+        # TODO (future): add time-varying recharge here.
 
-    # ------------------------------------------------------------------
-    # Backward compatibility method (old name used in solver)
-    # ------------------------------------------------------------------
-    @staticmethod
-    def build_W_vector(model, t):
-        """
-        Legacy static API used by old solver versions.
-        Returns W(x,y) [L/T].
-
-        This redirects into the new SourceSink class.
-        """
-        ss = SourceSink(model)
-        return ss.combined_flux(t)
+        return rhs
