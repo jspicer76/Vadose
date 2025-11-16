@@ -4,141 +4,183 @@ import numpy as np
 
 class BudgetEngine:
     """
-    Computes MODFLOW-style mass balance components
-    and generates formatted summary tables.
+    Computes MODFLOW-style mass balance components and
+    records per-time-step water budget for transient models.
 
     Components:
         - Wells
         - Recharge
-        - Constant / General Head boundaries
-        - Storage
+        - Boundaries
+        - Storage change
     """
 
     def __init__(self, model):
         self.model = model
+        self.records = []   # store per-step budget info
 
     # --------------------------------------------------------------
     # WELL FLUXES
     # --------------------------------------------------------------
     def compute_wells(self):
-        """Return (inflow, outflow) from wells."""
+        """Return (inflow, outflow) from wells. Positive = into model."""
         Q_in = 0.0
         Q_out = 0.0
 
         wells = getattr(self.model, "wells", [])
         for w in wells:
-            if w.Q >= 0:      # pumping draws from system
-                Q_out += w.Q
-            else:             # injection adds to system
-                Q_in += -w.Q
+            if w.Q >= 0:     # positive Q = injection = inflow
+                Q_in += w.Q
+            else:            # negative Q = pumping = outflow
+                Q_out += -w.Q
 
         return Q_in, Q_out
 
     # --------------------------------------------------------------
-    # RECHARGE
+    # RECHARGE FLUX
     # --------------------------------------------------------------
-    def compute_recharge(self):
-        """Compute recharge volume (always inflow)."""
-        rec = getattr(self.model, "recharge", None)
-        if isinstance(rec, np.ndarray):
-            cell_area = self.model.dx * self.model.dy
-            return np.sum(rec) * cell_area, 0.0
-        return 0.0, 0.0
+    def compute_recharge(self, R_field):
+        """
+        Compute recharge inflow (always positive).
+        R_field expected to be a 2D array matching grid.
+        """
+        if R_field is None:
+            return 0.0, 0.0
+
+        cell_area = self.model.dx * self.model.dy
+        total_R = np.sum(R_field) * cell_area
+        return total_R, 0.0
 
     # --------------------------------------------------------------
     # STORAGE CHANGE
     # --------------------------------------------------------------
-    def compute_storage_change(self, h_old, h_new, dt):
+        # --------------------------------------------------------------
+    # STORAGE CHANGE
+    # --------------------------------------------------------------
+    def compute_storage_change(self, h_old_flat, h_new_flat, dt):
         """
-        Compute volumetric storage change (not a flux rate):
-            dV = S * Δh * area
+        Compute volumetric storage change rate (L^3/T).
 
-        MODFLOW convention:
-        - Positive = water entering model (rise in head)
-        - Negative = water leaving model (decline in head)
+        Positive = water entering model  
+        Negative = water leaving model
         """
-        S = self.model.storage              # 2D array
-        dh = h_new - h_old                  # Δh
-        active = self.model.active          # active mask
 
+        nx, ny = self.model.nx, self.model.ny
+
+        # 1. Get storage vector from Storage module
+        #    NOTE: We call Storage(model).vector() on demand.
+        from backend.solvers.transient.storage import Storage
+        S_vec = Storage(self.model).vector()      # shape (N,)
+
+        # 2. Reshape heads
+        h_old = h_old_flat.flatten()
+        h_new = h_new_flat.flatten()
+
+        # 3. Head change
+        dh = h_new - h_old
+
+        # 4. Storage is S * dh * area
         cell_area = self.model.dx * self.model.dy
+        dV = np.sum(S_vec * dh) * cell_area
 
-        # Only active cells contribute and scale to volumetric rate
-        dV = np.sum(S[active] * dh[active]) * cell_area
+        # 5. Convert to flux (divide by dt)
         q_storage = dV / dt
 
-        # Split into inflow / outflow components
+        # Split into inflow/outflow
         if q_storage >= 0:
             return q_storage, 0.0
         else:
             return 0.0, -q_storage
 
-
     # --------------------------------------------------------------
-    # BOUNDARY FLUXES
+    # BOUNDARY FLUXES (General Head, River, Drain)
     # --------------------------------------------------------------
     def compute_bc_fluxes(self, h):
-        """
-        Compute fluxes for boundaries that use conductance:
-        e.g., General-Head, River, Drain.
-        """
+        """Return (inflow, outflow) for boundary conditions."""
+        bc_list = getattr(self.model, "boundary_conditions", [])
+        nx, ny = self.model.nx, self.model.ny
+
         Q_in = 0.0
         Q_out = 0.0
 
-        bcs = getattr(self.model, "boundary_conditions", [])
-        nx, ny = self.model.nx, self.model.ny
+        for bc in bc_list:
+            if not hasattr(bc, "C"):
+                continue
 
-        for bc in bcs:
-            if hasattr(bc, "C"):  # Conductance exists
-                for idx in bc.cells:
-                    i = idx // ny
-                    j = idx % ny
+            for idx in bc.cells:
+                i = idx // ny
+                j = idx % ny
 
-                    h_cell = h[i, j]
-                    h_bc = bc.hb if hasattr(bc, "hb") else getattr(bc, "stage", 0.0)
+                h_cell = h[i, j]
+                h_bc = getattr(bc, "hb", getattr(bc, "stage", 0.0))
 
-                    q = bc.C * (h_bc - h_cell) * (self.model.dx * self.model.dy)
+                q = bc.C * (h_bc - h_cell) * (self.model.dx * self.model.dy)
 
-                    if q >= 0:
-                        Q_in += q
-                    else:
-                        Q_out += -q
+                if q >= 0:
+                    Q_in += q
+                else:
+                    Q_out += -q
 
         return Q_in, Q_out
 
     # --------------------------------------------------------------
-    # SUMMARY TABLE
+    # NEW: RECORD A TIME STEP
     # --------------------------------------------------------------
-    def summarize(self, step, t, dt, h_old, h_new):
-        """Build MODFLOW-style summary table as a string."""
+    def record_step(self, step, t, h_new_flat, h_old_flat, dt):
+        """
+        Records full water budget for a transient step.
+        """
 
-        well_in, well_out     = self.compute_wells()
-        rech_in, rech_out     = self.compute_recharge()
-        stor_in, stor_out     = self.compute_storage_change(h_old, h_new, dt)
-        bc_in, bc_out         = self.compute_bc_fluxes(h_new)
+        # reshape heads into (nx, ny)
+        nx, ny = self.model.nx, self.model.ny
+        h_new = h_new_flat.reshape((nx, ny))
+        h_old = h_old_flat.reshape((nx, ny))
+
+        
+        # Recharge field at time t
+        if hasattr(self.model, "get_recharge_field"):
+            R_field = self.model.get_recharge_field(t)
+        else:
+            R_field = None
+
+        # Compute components
+        well_in,   well_out   = self.compute_wells()
+        rech_in,   rech_out   = self.compute_recharge(R_field)
+        bc_in,     bc_out     = self.compute_bc_fluxes(h_new)
+        stor_in,   stor_out   = self.compute_storage_change(
+            h_old_flat, h_new_flat, dt
+        )
 
         total_in  = well_in + rech_in + bc_in + stor_in
         total_out = well_out + rech_out + bc_out + stor_out
 
-        error = 0.0 if total_in == 0 else abs(total_in - total_out) / total_in * 100
+        imbalance = total_in - total_out
+        pct_error = 0.0 if total_in == 0 else abs(imbalance) / abs(total_in) * 100
 
-        lines = []
-        lines.append("\n===============================================================")
-        lines.append("                    VADOSE MASS BALANCE SUMMARY                ")
-        lines.append("===============================================================")
-        lines.append(f"Time step:        {step}")
-        lines.append(f"Simulation time:  {t:.2f} s")
-        lines.append(f"Δt:               {dt:.2f} s")
-        lines.append("---------------------------------------------------------------")
-        lines.append("Component                  Inflow         Outflow         Net")
-        lines.append("---------------------------------------------------------------")
-        lines.append(f"Wells                     {well_in:10.3f}   {well_out:10.3f}   {well_in - well_out:10.3f}")
-        lines.append(f"Recharge                  {rech_in:10.3f}   {rech_out:10.3f}   {rech_in - rech_out:10.3f}")
-        lines.append(f"BC Conductance Flux       {bc_in:10.3f}   {bc_out:10.3f}   {bc_in - bc_out:10.3f}")
-        lines.append(f"Storage Change            {stor_in:10.3f}   {stor_out:10.3f}   {stor_in - stor_out:10.3f}")
-        lines.append("---------------------------------------------------------------")
-        lines.append(f"TOTALS                    {total_in:10.3f}   {total_out:10.3f}   {total_in - total_out:10.3f}")
-        lines.append(f"Mass Balance Error (%)     {error:6.3f}%")
-        lines.append("===============================================================\n")
+        # store record
+        self.records.append({
+            "step": step,
+            "time": t,
+            "dt": dt,
+            "inflow": {
+                "wells": well_in,
+                "recharge": rech_in,
+                "boundaries": bc_in,
+                "storage": stor_in,
+            },
+            "outflow": {
+                "wells": well_out,
+                "recharge": rech_out,
+                "boundaries": bc_out,
+                "storage": stor_out,
+            },
+            "total_in": total_in,
+            "total_out": total_out,
+            "imbalance": imbalance,
+            "pct_error": pct_error,
+        })
 
-        return "\n".join(lines)
+    # --------------------------------------------------------------
+    # Full summary for debugging or export
+    # --------------------------------------------------------------
+    def summarize(self):
+        return self.records

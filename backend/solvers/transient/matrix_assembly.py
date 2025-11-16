@@ -3,13 +3,32 @@
 import numpy as np
 
 class MatrixAssembly:
-    @staticmethod
-    def build_conductance_matrix(model):
+    """
+    Conductance matrix builder for transient groundwater flow.
+
+    New architecture:
+      - Accepts model in constructor
+      - Provides a .matrix() method returning A (conductance matrix)
+    """
+
+    def __init__(self, model):
+        self.model = model
+
+    # ------------------------------------------------------------------
+    def matrix(self):
+        """Build and return the conductance matrix A."""
+        model = self.model
         nx, ny = model.nx, model.ny
         dx, dy = model.dx, model.dy
 
-        T = model.transmissivity
-        active = model.active
+        # Accept transmissivity as either T or transmissivity
+        if hasattr(model, "transmissivity"):
+            T = model.transmissivity
+        else:
+            T = model.T
+
+        # Accept active mask or default to all active
+        active = getattr(model, "active", np.ones((nx, ny), dtype=bool))
 
         A = np.zeros((nx * ny, nx * ny), dtype=float)
 
@@ -22,41 +41,42 @@ class MatrixAssembly:
                 if not active[i, j]:
                     continue
 
-                k = i * ny + j
+                k = i * ny + j  # flat index
                 diag = 0.0
 
-                # WEST
-                if i > 0 and active[i-1, j]:
-                    Tw, Te = T[i, j], T[i-1, j]
+                # WEST (i-1)
+                if i > 0 and active[i - 1, j]:
+                    Tw, Te = T[i, j], T[i - 1, j]
                     Cw = (2 * Tw * Te) / (Tw + Te) / dx2
-                    kw = (i-1) * ny + j
+                    kw = (i - 1) * ny + j
                     A[k, kw] -= Cw
                     diag += Cw
 
-                # EAST
-                if i < nx - 1 and active[i+1, j]:
-                    Tw, Te = T[i, j], T[i+1, j]
+                # EAST (i+1)
+                if i < nx - 1 and active[i + 1, j]:
+                    Tw, Te = T[i, j], T[i + 1, j]
                     Ce = (2 * Tw * Te) / (Tw + Te) / dx2
-                    ke = (i+1) * ny + j
+                    ke = (i + 1) * ny + j
                     A[k, ke] -= Ce
                     diag += Ce
 
-                # SOUTH
-                if j > 0 and active[i, j-1]:
-                    Tn, Ts = T[i, j], T[i, j-1]
+                # SOUTH (j-1)
+                if j > 0 and active[i, j - 1]:
+                    Tn, Ts = T[i, j], T[i, j - 1]
                     Cs = (2 * Tn * Ts) / (Tn + Ts) / dy2
-                    ks = i * ny + (j-1)
+                    ks = i * ny + (j - 1)
                     A[k, ks] -= Cs
                     diag += Cs
 
-                # NORTH
-                if j < ny - 1 and active[i, j+1]:
-                    Tn, Ts = T[i, j], T[i, j+1]
+                # NORTH (j+1)
+                if j < ny - 1 and active[i, j + 1]:
+                    Tn, Ts = T[i, j], T[i, j + 1]
                     Cn = (2 * Tn * Ts) / (Tn + Ts) / dy2
-                    kn = i * ny + (j+1)
+                    kn = i * ny + (j + 1)
                     A[k, kn] -= Cn
                     diag += Cn
 
+                # Diagonal
                 A[k, k] = diag
 
         return A

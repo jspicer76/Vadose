@@ -18,110 +18,92 @@ class TransientSolver:
     """
     Transient groundwater flow solver.
 
-    Architecture:
-      - stepper    → generates times (FixedTimeStepper)
-      - integrator → builds A_eff, b (ImplicitEulerStepper)
+    Implements:
+        (S/dt + A) h^n = S/dt * h^(n-1) + f(t_n)
+
+    where f(t) comes from wells and any other time-varying sources.
     """
 
-    def __init__(self, model, stepper, integrator):
+    def __init__(self, model, time_stepper):
+        if not isinstance(model, TransientModel):
+            raise TypeError("TransientSolver: model must be a TransientModel")
+
         self.model = model
-        self.stepper = stepper
-        self.integrator = integrator
+        self.time_stepper = time_stepper
         self.logs = SolverLogs()
-        self.observations = None
 
-    # --------------------------------------------------------------
-    def run(self, t_start, t_end, dt):
-        """
-        Execute transient simulation from t_start to t_end with time-step dt.
-        Returns:
-            heads: (ntime, nx, ny) array
-            logs : SolverLogs instance
-        """
+        # Build components
+        self.assembly = MatrixAssembly(model)
+        self.storage = Storage(model)
+        self.source_sink = SourceSink(model)
+        self.budget = BudgetEngine(model)
 
-        nx, ny = self.model.nx, self.model.ny
-        budget_engine = BudgetEngine(self.model)
+    # ------------------------------------------------------------------
+    def run(self, t_start: float, t_end: float, dt: float):
+        """
+        Advance solution in time. Returns:
+            heads: list of head fields at each time step
+            obs_data: observation point records
+            logs: detailed solver logs
+        """
+        self.logs.start("transient")
+
+        # Time vector
+        times = np.arange(t_start, t_end + dt, dt)
+
+        nsteps = len(times)
+        n = self.model.grid.num_cells
+
+        # Build static matrices
+        A = self.assembly.matrix()     # conductance matrix
+        S = self.storage.vector()      # storage coeffs per cell
+
+        # Precompute S/dt
+        S_over_dt = S / dt
+
+        # LHS matrix: (S/dt + A)
+        LHS = np.diag(S_over_dt) + A
 
         # Initial head
-        h = self.model.h0.copy()
-        heads = [h.copy()]
-        step = 0
+        h_prev = self.model.initial_head.copy()
 
-        # Time sequence from the stepper
-        times = self.stepper.times()
+        heads = [h_prev.copy()]
+
+        # Observation recorder
+        from .observations import ObservationRecorder
         obs_recorder = ObservationRecorder(self.model)
-        obs_recorder.record(times[0], h)
 
-        for idx in range(len(times) - 1):
-            t  = times[idx]
-            dt = times[idx + 1] - times[idx]
+        for k in range(1, nsteps):
+            t = times[k]
 
-            # ----------------------------------------------------------
-            # Conductance matrix A
-            # ----------------------------------------------------------
-            A = MatrixAssembly.build_conductance_matrix(self.model)
+            # Right-hand side: S/dt * h_prev + f(t)
+            rhs = S_over_dt * h_prev
+            rhs += self.source_sink.vector_at_time(t)
 
-            # ----------------------------------------------------------
-            # Volumetric source/sink W (wells + recharge)
-            # ----------------------------------------------------------
-            W = SourceSink.build_W_vector(self.model, t)
+            # Solve
+            h_new = self.time_stepper.solve(LHS, rhs)
 
-            # ----------------------------------------------------------
-            # Storage term C = S*b*area
-            # ----------------------------------------------------------
-            self.model.storage = Storage.compute_storage(self.model, h)
+            # Store
+            heads.append(h_new.copy())
 
-            # ----------------------------------------------------------
-            # Build the system A_eff h_new = b
-            # ----------------------------------------------------------
-            A_eff, b = self.integrator.build_system(
-                self.model, h, dt, A, W
-            )
-            b = b.flatten()
+            # Record observations
+            obs_recorder.record(t, h_new)
 
-            # ----------------------------------------------------------
-            # Apply all boundary conditions
-            # ----------------------------------------------------------
-            for bc in self.model.boundary_conditions:
+            # Budget
+            self.budget.record_step(k, t, h_new, h_prev, dt)
 
-                # (1) time-dependent updates
-                if hasattr(bc, "update") and callable(bc.update):
-                    bc.update(t + dt)
+            # Logging
+            self.logs.step(k, t, residual=None, note="OK")
 
-                # (2) BCs with A/B modification (Dirichlet, GHB, River, Theis...)
-                if hasattr(bc, "apply"):
-                    A_eff, b = bc.apply(A_eff, b)
+            # Advance
+            h_prev = h_new
 
-                # (3) Flux BC (Neumann): adds only to RHS
-                if hasattr(bc, "apply_to_rhs"):
-                    b = bc.apply_to_rhs(b, t)
+        self.logs.finish("transient")
 
-            # ----------------------------------------------------------
-            # Solve linear system
-            # ----------------------------------------------------------
-            h_new = np.linalg.solve(A_eff, b).reshape((nx, ny))
+        # Package observation results
+        obs_data = obs_recorder.get_results()
 
-            # ----------------------------------------------------------
-            # Debug + mass balance
-            # ----------------------------------------------------------
-            if step == 0:
-                print("DEBUG: h_new range:", h_new.min(), h_new.max())
-
-            if step % getattr(self.model, "budget_interval", 10) == 0:
-                print(budget_engine.summarize(step, t, dt, h, h_new))
-
-            # Prepare for next step
-            h = h_new
-            heads.append(h.copy())
-            self.logs.log(t, dt, step, "Transient step completed")
-            obs_recorder.record(times[idx + 1], h)
-            step += 1
-
-        obs_data = obs_recorder.results()
-        self.logs.observations = obs_data
-        self.observations = obs_data
-
-        return np.array(heads), obs_data, self.logs
+        return heads, obs_data, self.logs
 
 
 def run_transient_solver(config):
