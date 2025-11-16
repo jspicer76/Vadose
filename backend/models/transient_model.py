@@ -36,13 +36,20 @@ class TransientModel:
 
         # Initial head field
         # Ensure initial head is a full (nx, ny) grid
-        if np.isscalar(h0):
-            self.h0 = np.full((nx, ny), float(h0), dtype=float)
+        arr = np.asarray(h0, dtype=float)
+
+        if np.isscalar(h0) or arr.size == 1:
+            # Accept Python scalars and NumPy 0-d arrays
+            self.h0 = np.full((nx, ny), float(arr), dtype=float)
+        elif arr.shape == (nx, ny):
+            self.h0 = arr.copy()
+        elif arr.size == nx * ny:
+            # Allow flattened inputs that contain the right number of cells
+            self.h0 = arr.reshape((nx, ny))
         else:
-            arr = np.asarray(h0, dtype=float)
-            if arr.shape != (nx, ny):
-                arr = arr.reshape((nx, ny))
-            self.h0 = arr
+            raise ValueError(
+                f"Initial head has shape {arr.shape}, expected {(nx, ny)}"
+            )
 
 
 

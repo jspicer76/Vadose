@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=67", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vadose"
+version = "0.1.0"
+description = "Vadose groundwater modeling framework"
+authors = [{ name = "Shane Spicer" }]
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.20"
+]
+
+[tool.setuptools]
+packages = ["backend"]
+include-package-data = true
+
+[tool.pytest.ini_options]
+testpaths = [
+  "backend/tests"
+]
+python_files = [
+  "test_*.py"
+]

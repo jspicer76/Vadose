@@ -1,0 +1,8 @@
+LICENSE
+pyproject.toml
+backend/__init__.py
+vadose.egg-info/PKG-INFO
+vadose.egg-info/SOURCES.txt
+vadose.egg-info/dependency_links.txt
+vadose.egg-info/requires.txt
+vadose.egg-info/top_level.txt

@@ -24,8 +24,9 @@ class SourceSink:
             # Convert m³/s → m/s (flux per area)
             W[i, j] -= well.Q / cell_area
 
-        # Recharge (already m/s)
+        # Recharge (R is m/s, already flux per unit area)
         if getattr(model, "recharge", None) is not None:
-            W += model.recharge
+            R = model.recharge
+            W += R
 
         return W
