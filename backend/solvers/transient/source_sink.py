@@ -6,122 +6,123 @@ from typing import List, Tuple, Any
 import numpy as np
 
 from .pumping_schedule import PumpingSchedule, make_schedule
+from .recharge_schedule import make_recharge_schedule, ConstantRecharge
 
 
 class SourceSink:
     """
     Builds the right-hand-side (RHS) vector for the transient system,
-    accounting for wells (Q(t)) and, later, time-varying recharge.
-
-    Assumptions about the model:
-      - model.grid has:
-          * num_cells (int)
-          * cell_index(row, col) -> flat index
-      - model.wells is a list of well objects or dicts.
-        Each well provides:
-          * row/col or i/j (zero-based indices)
-          * Q or q  (base pumping rate)
-          * optional 'schedule' config:
-              - attribute .schedule (object or dict), or
-              - key 'schedule' when well is a dict.
+    accounting for:
+        - Wells Q(t)
+        - Recharge R(t)
     """
 
     def __init__(self, model: Any):
         self.model = model
-        self.grid = model.grid
-        self.n = self.grid.num_cells
+        self.grid = model
+        self.n = model.nx * model.ny
 
-        # List of (cell_index, schedule) pairs
+        # --------------------------------------------------------------
+        # Build pumping schedules
+        # --------------------------------------------------------------
         self._well_schedules: List[Tuple[int, PumpingSchedule]] = []
-
         self._build_well_schedules()
-        # Recharge schedules could be added later in the same pattern
+
+        # --------------------------------------------------------------
+        # Build recharge schedule (R(t))
+        # --------------------------------------------------------------
+        self.recharge_schedule = None
+        R = getattr(model, "recharge", None)
+
+        if R is None:
+            self.recharge_schedule = None
+
+        elif isinstance(R, dict):
+            # Time-varying recharge schedule
+            self.recharge_schedule = make_recharge_schedule(model, R)
+
+        elif np.isscalar(R):
+            # Constant scalar recharge (uniform)
+            self.recharge_schedule = ConstantRecharge(R, model.nx, model.ny)
+
+        elif isinstance(R, np.ndarray):
+            # Constant spatial recharge field
+            self.recharge_schedule = lambda t, R=R: R
+
+        else:
+            raise TypeError(f"Unsupported recharge format: {type(R)}")
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # INTERNAL — build well schedule list
     # ------------------------------------------------------------------
     def _build_well_schedules(self) -> None:
-        """Prepare (index, schedule) pairs for all wells in the model."""
+        """Prepare (cell_idx, schedule_fn) entries for wells."""
         self._well_schedules.clear()
-
         wells = getattr(self.model, "wells", []) or []
 
         for w in wells:
-            # --- row / col -------------------------------------------------
-            row = None
-            col = None
+            # Extract well location (row,col)
+            row = getattr(w, "row", getattr(w, "i", None))
+            col = getattr(w, "col", getattr(w, "j", None))
 
-            # Object-style wells
-            if hasattr(w, "row"):
-                row = getattr(w, "row")
-            elif hasattr(w, "i"):
-                row = getattr(w, "i")
+            if isinstance(w, dict):
+                row = w.get("row", w.get("i", row))
+                col = w.get("col", w.get("j", col))
 
-            if hasattr(w, "col"):
-                col = getattr(w, "col")
-            elif hasattr(w, "j"):
-                col = getattr(w, "j")
-
-            # Dict-style wells as fallback
-            if (row is None or col is None) and isinstance(w, dict):
-                row = w.get("row", w.get("i"))
-                col = w.get("col", w.get("j"))
-
-            # Skip if we still don't have valid indices
             if row is None or col is None:
-                # You could log a warning here if desired
                 continue
 
-            # --- base Q ----------------------------------------------------
-            base_q = None
+            # Extract pumping rate
             if hasattr(w, "Q"):
-                base_q = getattr(w, "Q")
+                base_q = float(w.Q)
             elif hasattr(w, "q"):
-                base_q = getattr(w, "q")
+                base_q = float(w.q)
             elif isinstance(w, dict):
-                base_q = w.get("Q", w.get("q", 0.0))
-
-            if base_q is None:
+                base_q = float(w.get("Q", w.get("q", 0.0)))
+            else:
                 base_q = 0.0
 
-            # --- schedule config -------------------------------------------
-            schedule_cfg = None
+            # Extract schedule config
             if hasattr(w, "schedule"):
-                schedule_cfg = getattr(w, "schedule")
+                schedule_cfg = w.schedule
             elif isinstance(w, dict):
                 schedule_cfg = w.get("schedule")
-
-            # If schedule_cfg is already a PumpingSchedule, keep it
-            if isinstance(schedule_cfg, PumpingSchedule.__constraints__ if hasattr(PumpingSchedule, "__constraints__") else ()):  # type: ignore
-                schedule = schedule_cfg  # not typical branch; left for completeness
             else:
-                # Expect config dict; factory will fall back to constant if None/invalid
-                schedule = make_schedule(
-                    config=schedule_cfg if isinstance(schedule_cfg, dict) else None,
-                    default_q=float(base_q),
-                )
+                schedule_cfg = None
 
-            # --- map to global cell index ----------------------------------
-            cell_idx = self.grid.cell_index(int(row), int(col))
+            # Build schedule
+            schedule = make_schedule(
+                config=schedule_cfg if isinstance(schedule_cfg, dict) else None,
+                default_q=base_q,
+            )
 
-            self._well_schedules.append((cell_idx, schedule))
+            # Convert cell (i,j) → global index
+            idx = self.grid.cell_index(int(row), int(col))
+            self._well_schedules.append((idx, schedule))
 
     # ------------------------------------------------------------------
-    # Public API
+    # PUBLIC — assemble f(t)
     # ------------------------------------------------------------------
     def vector_at_time(self, t: float) -> np.ndarray:
         """
-        Return the RHS vector f(t) from wells at time t.
-
-        Sign convention:
-          - Use your model's convention (typically negative for pumping).
+        Build RHS vector f(t) from:
+            - Wells Q(t)
+            - Recharge R(t)
         """
         rhs = np.zeros(self.n, dtype=float)
 
-        # Wells
+        # --------------------------------------------------------------
+        # Wells Q(t)
+        # --------------------------------------------------------------
         for idx, schedule in self._well_schedules:
             rhs[idx] += schedule(t)
 
-        # TODO (future): add time-varying recharge here.
+        # --------------------------------------------------------------
+        # Recharge R(t)
+        # --------------------------------------------------------------
+        if self.recharge_schedule is not None:
+            R_field = self.recharge_schedule(t)  # shape (nx, ny)
+            cell_area = self.grid.dx * self.grid.dy
+            rhs += R_field.flatten() * cell_area
 
         return rhs
