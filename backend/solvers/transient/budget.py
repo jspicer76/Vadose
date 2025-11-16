@@ -8,84 +8,96 @@ class BudgetEngine:
     and generates formatted summary tables.
 
     Components:
-        - Constant head boundaries
-        - General head boundaries
-        - River leakage
-        - Recharge
         - Wells
-        - Storage change
+        - Recharge
+        - Constant / General Head boundaries
+        - Storage
     """
 
     def __init__(self, model):
         self.model = model
 
     # --------------------------------------------------------------
-    # FLUX CALCULATIONS
+    # WELL FLUXES
     # --------------------------------------------------------------
-
     def compute_wells(self):
         """Return (inflow, outflow) from wells."""
         Q_in = 0.0
         Q_out = 0.0
 
-        if not hasattr(self.model, "wells"):
-            return Q_in, Q_out
-
-        for w in self.model.wells:
-            if w.Q > 0:
-                Q_in += w.Q
-            else:
-                Q_out += -w.Q
+        wells = getattr(self.model, "wells", [])
+        for w in wells:
+            if w.Q >= 0:      # pumping draws from system
+                Q_out += w.Q
+            else:             # injection adds to system
+                Q_in += -w.Q
 
         return Q_in, Q_out
 
+    # --------------------------------------------------------------
+    # RECHARGE
+    # --------------------------------------------------------------
     def compute_recharge(self):
-        """Compute volumetric recharge (positive only)."""
+        """Compute recharge volume (always inflow)."""
         rec = getattr(self.model, "recharge", None)
         if isinstance(rec, np.ndarray):
-            vol = np.sum(rec) * self.model.dx * self.model.dy
-            return vol, 0.0
+            cell_area = self.model.dx * self.model.dy
+            return np.sum(rec) * cell_area, 0.0
         return 0.0, 0.0
 
+    # --------------------------------------------------------------
+    # STORAGE CHANGE
+    # --------------------------------------------------------------
     def compute_storage_change(self, h_old, h_new, dt):
-        """Compute change in aquifer storage."""
-        S = self.model.storage
-        dV = np.sum(S * (h_new - h_old) / dt) * self.model.dx * self.model.dy
+        """
+        Compute volumetric storage change (not a flux rate):
+            dV = S * Δh * area
 
-        if dV >= 0:
-            return dV, 0.0
+        MODFLOW convention:
+        - Positive = water entering model (rise in head)
+        - Negative = water leaving model (decline in head)
+        """
+        S = self.model.storage              # 2D array
+        dh = h_new - h_old                  # Δh
+        active = self.model.active          # active mask
+
+        cell_area = self.model.dx * self.model.dy
+
+        # Only active cells contribute and scale to volumetric rate
+        dV = np.sum(S[active] * dh[active]) * cell_area
+        q_storage = dV / dt
+
+        # Split into inflow / outflow components
+        if q_storage >= 0:
+            return q_storage, 0.0
         else:
-            return 0.0, -dV
+            return 0.0, -q_storage
 
+
+    # --------------------------------------------------------------
+    # BOUNDARY FLUXES
+    # --------------------------------------------------------------
     def compute_bc_fluxes(self, h):
         """
-        Compute fluxes from boundary conditions that rely
-        on conductance: GHB, River, etc.
-
-        Dirichlet BC fluxes will be handled separately because
-        they overwrite A/b but do not contribute a natural flux.
+        Compute fluxes for boundaries that use conductance:
+        e.g., General-Head, River, Drain.
         """
-
         Q_in = 0.0
         Q_out = 0.0
 
-        if not hasattr(self.model, "boundary_conditions"):
-            return Q_in, Q_out
-
+        bcs = getattr(self.model, "boundary_conditions", [])
         nx, ny = self.model.nx, self.model.ny
 
-        for bc in self.model.boundary_conditions:
-            if hasattr(bc, "C"):  # Conductance-based BC
+        for bc in bcs:
+            if hasattr(bc, "C"):  # Conductance exists
                 for idx in bc.cells:
-
                     i = idx // ny
                     j = idx % ny
 
                     h_cell = h[i, j]
                     h_bc = bc.hb if hasattr(bc, "hb") else getattr(bc, "stage", 0.0)
-                    C = bc.C
 
-                    q = C * (h_bc - h_cell) * self.model.dx * self.model.dy
+                    q = bc.C * (h_bc - h_cell) * (self.model.dx * self.model.dy)
 
                     if q >= 0:
                         Q_in += q
@@ -97,29 +109,19 @@ class BudgetEngine:
     # --------------------------------------------------------------
     # SUMMARY TABLE
     # --------------------------------------------------------------
-
     def summarize(self, step, t, dt, h_old, h_new):
         """Build MODFLOW-style summary table as a string."""
 
-        # Wells
-        well_in, well_out = self.compute_wells()
+        well_in, well_out     = self.compute_wells()
+        rech_in, rech_out     = self.compute_recharge()
+        stor_in, stor_out     = self.compute_storage_change(h_old, h_new, dt)
+        bc_in, bc_out         = self.compute_bc_fluxes(h_new)
 
-        # Recharge
-        rech_in, rech_out = self.compute_recharge()
-
-        # Storage
-        stor_in, stor_out = self.compute_storage_change(h_old, h_new, dt)
-
-        # BC Fluxes
-        bc_in, bc_out = self.compute_bc_fluxes(h_new)
-
-        # Totals
-        total_in = well_in + rech_in + bc_in + stor_in
+        total_in  = well_in + rech_in + bc_in + stor_in
         total_out = well_out + rech_out + bc_out + stor_out
 
         error = 0.0 if total_in == 0 else abs(total_in - total_out) / total_in * 100
 
-        # Build formatted table
         lines = []
         lines.append("\n===============================================================")
         lines.append("                    VADOSE MASS BALANCE SUMMARY                ")

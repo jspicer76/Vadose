@@ -10,21 +10,22 @@ class SourceSink:
     @staticmethod
     def build_W_vector(model, t):
         """
-        Returns W array same shape as model.h of volumetric flux per cell.
-        + positive for injection/recharge
-        - negative for pumping
+        Returns W array same shape as model.h of volumetric flux PER UNIT AREA.
+        Positive = injection / recharge
+        Negative = pumping
         """
 
-        W = np.zeros((model.nx, model.ny))
+        W = np.zeros((model.nx, model.ny), dtype=float)
+        cell_area = model.dx * model.dy
 
         # Wells
         for well in model.wells:
             i, j = well.cell
-            W[i, j] -= well.Q  # pumping negative sign convention
+            # Convert m³/s → m/s (flux per area)
+            W[i, j] -= well.Q / cell_area
 
-        # Recharge (MODFLOW-style RCH)
+        # Recharge (already m/s)
         if getattr(model, "recharge", None) is not None:
-            W += model.recharge  # distributed recharge array
-
+            W += model.recharge
 
         return W
