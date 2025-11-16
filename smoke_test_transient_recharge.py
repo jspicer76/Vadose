@@ -14,12 +14,12 @@ from backend.solvers.transient.time_stepper import (
 nx, ny = 3, 3
 dx = dy = 10.0
 
-T = 10.0         # transmissivity
+T = 1000.0       # transmissivity
 S = 1e-4         # storativity
-h0 = 100.0       # starting head everywhere
+h0 = 10.0       # starting head everywhere
 
 # Recharge: 1e-5 m/s applied uniformly
-recharge_rate = 1e-5
+recharge_rate = 1e-7
 
 
 # ------------------------------------------------------
@@ -41,7 +41,7 @@ model = TransientModel(
 # ------------------------------------------------------
 t_start = 0
 t_end   = 6 * 3600
-dt      = 3600       # 1 hour
+dt      = 300       # 1 hour
 
 stepper = FixedTimeStepper(t_start, t_end, dt)
 integrator = ImplicitEulerStepper()
