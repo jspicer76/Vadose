@@ -21,6 +21,11 @@ h0 = 100.0       # starting head everywhere
 # Recharge: 1e-5 m/s applied uniformly
 recharge_rate = 1e-5
 
+# Define an observation point at the center of the grid
+observation_points = [
+    {"name": "Center", "i": 1, "j": 1},
+]
+
 
 # ------------------------------------------------------
 # 2. Build transient model
@@ -33,6 +38,7 @@ model = TransientModel(
     pumping_wells=None,
     boundary_conditions=None,
     recharge=recharge_rate,
+    observation_points=observation_points,
 )
 
 
@@ -51,7 +57,7 @@ solver = TransientSolver(model, stepper, integrator)
 # ------------------------------------------------------
 # 4. Run solver
 # ------------------------------------------------------
-heads, logs = solver.run(t_start, t_end, dt)
+heads, obs_data, logs = solver.run(t_start, t_end, dt)
 final_heads = heads[-1]
 print("\n=== Final Heads After Recharge ===")
 print(final_heads)
@@ -59,3 +65,10 @@ print(final_heads)
 # Quick sanity: heads should increase
 print("\nHead increase (m):")
 print(final_heads - model.h0)
+
+obs = obs_data
+if obs["_times"].size:
+    name = observation_points[0]["name"]
+    print(f"\nObservation '{name}' head(t):")
+    for t_val, head, dd in zip(obs["_times"], obs[name], obs[f"{name}_drawdown"]):
+        print(f"t={t_val/3600:.1f} h -> {head:.3f} m, drawdown={dd:.3f} m")

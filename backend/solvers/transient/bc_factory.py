@@ -4,84 +4,85 @@
 BCFactory: Converts simple config dictionaries into boundary condition
 class instances used by the transient solver.
 
-This allows regression tests and solver configs to specify BCs like:
+Example configurations:
 
     {"type": "dirichlet", "cells": [...], "value": 100}
 
-    {"type": "ghb", "cells": [...], "stage": 10.0, "C": 5e-5}
+    {"type": "ghb", "cells": [...], "stage": 10, "conductance": 5e-5}
 
-    {"type": "river", "cells": [...], "stage": 9.0, "conductance": 1e-3}
+    {"type": "river", "cells": [...], "stage": 8.5, "conductance": 1e-4}
 
+    {"type": "flux", "cells": [...], "flux": -1e-6}
 """
 
 from typing import Dict, Any
 
-# Import all BC classes your solver supports
+# BC class imports
 from backend.solvers.transient.boundary_conditions.dirichlet import DirichletBC
 from backend.solvers.transient.boundary_conditions.neumann import NeumannBC
 from backend.solvers.transient.boundary_conditions.general_head import GeneralHeadBC
 from backend.solvers.transient.boundary_conditions.river import RiverBC
 from backend.solvers.transient.boundary_conditions.recharge import RechargeBC
 from backend.solvers.transient.boundary_conditions.theis_dirichlet import TheisDirichletBC
+from backend.solvers.transient.boundary_conditions.flux_bc import FluxBC
 
 
 class BCFactory:
-    """Factory class to create boundary condition objects from dict configs."""
+    """
+    Factory class to create BC objects from simple dictionaries.
+
+    NOTE:
+    - For boundaries requiring `model` (FluxBC), the model must
+      be injected later by TransientModel or TransientSolver.
+    """
 
     @staticmethod
-    def create(bc_conf: Dict[str, Any]):
+    def create(bc_conf: Dict[str, Any], model=None):
         """
-        Accepts a dict from config or regression tests and returns
-        an instantiated boundary condition object.
+        Convert a BC config dict into a BC instance.
 
-        Example input:
-            {"type": "dirichlet", "cells": [...], "value": 100}
-
-            {"type": "ghb", "cells": [...], "stage": 10, "C": 1e-3}
-
+        If a BC requires `model` (FluxBC), the caller must pass it.
         """
         if "type" not in bc_conf:
-            raise ValueError(f"Boundary condition missing 'type': {bc_conf}")
+            raise ValueError("BC config missing 'type' key")
 
         bc_type = bc_conf["type"].lower()
 
-        # ------------------------------------------------------------------
-        #                       DIRICHLET (fixed head)
-        # ------------------------------------------------------------------
+        # ----------------------------------------------------------
+        # Dirichlet (fixed head)
+        # ----------------------------------------------------------
         if bc_type == "dirichlet":
             return DirichletBC(
                 cells=bc_conf["cells"],
                 head_value=bc_conf["value"]
             )
 
-        # ------------------------------------------------------------------
-        #                       NEUMANN (specified flux)
-        # ------------------------------------------------------------------
+        # ----------------------------------------------------------
+        # Neumann BC (legacy): same as flux but NO volume conversion
+        # ----------------------------------------------------------
         if bc_type == "neumann":
             return NeumannBC(
                 cells=bc_conf["cells"],
                 flux_value=bc_conf["value"]
             )
 
-        # ------------------------------------------------------------------
-        #         GENERAL HEAD BOUNDARY (MODFLOW GHB-like)
-        # ------------------------------------------------------------------
+        # ----------------------------------------------------------
+        # General-head BC (MODFLOW GHB)
+        # ----------------------------------------------------------
         if bc_type == "ghb":
-            conductance = bc_conf.get("conductance", bc_conf.get("C"))
+            C = bc_conf.get("conductance", bc_conf.get("C"))
             stage = bc_conf.get("stage")
-            if conductance is None or stage is None:
-                raise ValueError(
-                    f"GHB requires 'stage' and 'C/conductance': {bc_conf}"
-                )
+            if C is None or stage is None:
+                raise ValueError("GHB requires 'stage' and 'conductance'")
             return GeneralHeadBC(
                 cells=bc_conf["cells"],
-                conductance=conductance,
+                conductance=C,
                 boundary_head=stage
             )
 
-        # ------------------------------------------------------------------
-        #                            RIVER BC
-        # ------------------------------------------------------------------
+        # ----------------------------------------------------------
+        # River BC
+        # ----------------------------------------------------------
         if bc_type == "river":
             return RiverBC(
                 cells=bc_conf["cells"],
@@ -89,19 +90,18 @@ class BCFactory:
                 conductance=bc_conf["conductance"]
             )
 
-        # ------------------------------------------------------------------
-        #                        RECHARGE BC
-        # ------------------------------------------------------------------
+        # ----------------------------------------------------------
+        # Recharge BC (specialized)
+        # ----------------------------------------------------------
         if bc_type == "recharge":
             return RechargeBC(
                 cells=bc_conf["cells"],
                 rate=bc_conf["rate"]
             )
 
-        # ------------------------------------------------------------------
-        #                        THEIS-DIRICHLET BC
-        #    (Used by your perimeter infinite aquifer test harness)
-        # ------------------------------------------------------------------
+        # ----------------------------------------------------------
+        # Theis infinite-extent perimeter BC
+        # ----------------------------------------------------------
         if bc_type == "theis":
             return TheisDirichletBC(
                 cells=bc_conf["cells"],
@@ -114,7 +114,19 @@ class BCFactory:
                 head0=bc_conf["head0"]
             )
 
-        # ------------------------------------------------------------------
-        #                     Unsupported BC type
-        # ------------------------------------------------------------------
-        raise ValueError(f"Unknown boundary condition type '{bc_type}' in {bc_conf}")
+        # ----------------------------------------------------------
+        # NEW: Specified FLUX BC  (this is your M.1f Step 2)
+        # ----------------------------------------------------------
+        if bc_type == "flux":
+            if model is None:
+                raise ValueError("FluxBC requires model reference")
+            return FluxBC(
+                cells=bc_conf["cells"],
+                flux=bc_conf["flux"],   # scalar, array, or callable
+                model=model
+            )
+
+        # ----------------------------------------------------------
+        # Unknown BC type
+        # ----------------------------------------------------------
+        raise ValueError(f"Unknown BC type '{bc_type}'")

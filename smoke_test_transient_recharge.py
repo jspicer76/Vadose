@@ -14,12 +14,17 @@ from backend.solvers.transient.time_stepper import (
 nx, ny = 3, 3
 dx = dy = 10.0
 
-T = 1000.0       # transmissivity
+T = 10.0         # transmissivity
 S = 1e-4         # storativity
-h0 = 10.0       # starting head everywhere
+h0 = 100.0       # starting head everywhere
 
 # Recharge: 1e-5 m/s applied uniformly
-recharge_rate = 1e-7
+recharge_rate = 1e-5
+
+# Observation point for time-series extraction
+observation_points = [
+    {"name": "Center", "i": 1, "j": 1},
+]
 
 
 # ------------------------------------------------------
@@ -33,6 +38,7 @@ model = TransientModel(
     pumping_wells=None,
     boundary_conditions=None,
     recharge=recharge_rate,
+    observation_points=observation_points,
 )
 
 
@@ -41,7 +47,7 @@ model = TransientModel(
 # ------------------------------------------------------
 t_start = 0
 t_end   = 6 * 3600
-dt      = 300       # 1 hour
+dt      = 3600       # 1 hour
 
 stepper = FixedTimeStepper(t_start, t_end, dt)
 integrator = ImplicitEulerStepper()
@@ -51,7 +57,7 @@ solver = TransientSolver(model, stepper, integrator)
 # ------------------------------------------------------
 # 4. Run solver
 # ------------------------------------------------------
-heads, logs = solver.run(t_start, t_end, dt)
+heads, obs_data, logs = solver.run(t_start, t_end, dt)
 final_heads = heads[-1]
 print("\n=== Final Heads After Recharge ===")
 print(final_heads)
@@ -59,3 +65,10 @@ print(final_heads)
 # Quick sanity: heads should increase
 print("\nHead increase (m):")
 print(final_heads - model.h0)
+
+obs = obs_data
+if obs["_times"].size:
+    name = observation_points[0]["name"]
+    print(f"\nObservation '{name}' head(t):")
+    for t_val, head, dd in zip(obs["_times"], obs[name], obs[f"{name}_drawdown"]):
+        print(f"t={t_val/3600:.1f} h -> {head:.3f} m, drawdown={dd:.3f} m")

@@ -10,9 +10,26 @@ class Well:
         (i, j): cell index
         Q     : discharge (positive = injection, negative = pumping)
     """
+
     def __init__(self, i, j, Q):
         self.cell = (i, j)
         self.Q = Q
+
+
+class ObservationPoint:
+    """
+    Stores metadata for an observation / monitoring location.
+    """
+
+    def __init__(self, i, j, name, reference_head):
+        self.i = int(i)
+        self.j = int(j)
+        self.name = name
+        self.reference_head = float(reference_head)
+
+    @property
+    def cell(self):
+        return (self.i, self.j)
 
 
 class TransientModel:
@@ -38,6 +55,7 @@ class TransientModel:
         pumping_wells=None,
         boundary_conditions=None,
         recharge=None,              # NEW
+        observation_points=None,    # NEW: list of dicts/cells
     ):
         # --------------------------------------------------------------
         # Grid geometry
@@ -95,9 +113,35 @@ class TransientModel:
         # --------------------------------------------------------------
         self.recharge = recharge
 
+        # --------------------------------------------------------------
+        # Observation points (optional)
+        # --------------------------------------------------------------
+        self.observation_points = []
+        if observation_points:
+            self._init_observation_points(observation_points)
+
         # Used by solver during timestepping
         self.storage = None
         self.budget_interval = 10
+    # --------------------------------------------------------------
+    # Observation Points (Step 3)
+    # --------------------------------------------------------------
+    def add_observation_point(self, i, j, name=None):
+        """
+        Register an observation point at (i, j).
+        This stores the point so the solver can record head(t) later.
+        """
+        if not hasattr(self, "observation_points"):
+            self.observation_points = []
+
+        if name is None:
+            name = f"obs_{len(self.observation_points) + 1}"
+
+        self.observation_points.append({
+            "i": int(i),
+            "j": int(j),
+            "name": name
+        })
 
     # ==============================================================
     # Helper: Fetch wells
@@ -160,3 +204,64 @@ class TransientModel:
             f"Recharge shape {R.shape} is invalid — "
             f"expected scalar, {(self.nx, self.ny)}, or size={self.N}."
         )
+
+    # ==============================================================
+    # Observation helpers
+    # ==============================================================
+    def _init_observation_points(self, configs):
+        for idx, conf in enumerate(configs):
+            point = self._make_observation_point(conf, idx)
+            self.observation_points.append(point)
+
+    def _make_observation_point(self, conf, idx):
+        if isinstance(conf, ObservationPoint):
+            i, j = conf.cell
+            name = conf.name or f"Obs-{idx+1}"
+            ref = conf.reference_head
+            return ObservationPoint(i, j, name, ref)
+
+        if isinstance(conf, dict):
+            if "cell" in conf:
+                i, j = conf["cell"]
+            else:
+                i = conf.get("i")
+                j = conf.get("j")
+            if i is None or j is None:
+                raise ValueError("Observation dict requires 'i' and 'j' or 'cell'")
+            name = conf.get("name") or conf.get("label")
+            ref = conf.get("reference_head")
+        elif isinstance(conf, (tuple, list)) and len(conf) == 2:
+            i, j = conf
+            name = None
+            ref = None
+        else:
+            raise ValueError(f"Invalid observation point definition: {conf}")
+
+        i = int(i)
+        j = int(j)
+        self._validate_cell_indices(i, j)
+
+        if ref is None:
+            ref = float(self.h0[i, j])
+
+        label = name or f"Obs-{idx+1}"
+        return ObservationPoint(i, j, label, ref)
+
+    def _validate_cell_indices(self, i, j):
+        if not (0 <= i < self.nx and 0 <= j < self.ny):
+            raise ValueError(
+                f"Observation cell {(i, j)} outside grid {(self.nx, self.ny)}"
+            )
+
+    def add_observation_point(self, i, j, name=None, reference_head=None):
+        """
+        Convenience helper to add an observation point after model creation.
+        """
+        conf = {"i": i, "j": j}
+        if name is not None:
+            conf["name"] = name
+        if reference_head is not None:
+            conf["reference_head"] = reference_head
+        point = self._make_observation_point(conf, len(self.observation_points))
+        self.observation_points.append(point)
+        return point

@@ -7,6 +7,7 @@ class SolverLogs:
 
     def __init__(self):
         self.entries = []
+        self.observations = None
 
     def log(self, t, dt, iteration, notes):
         entry = {

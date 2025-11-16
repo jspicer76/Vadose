@@ -2,9 +2,16 @@
 
 import numpy as np
 
-from backend.solvers.transient.transient_solver import TransientSolver
-from backend.solvers.transient.time_stepper import ImplicitEulerStepper
+from backend.solvers.transient.transient_solver import (
+    TransientSolver,
+    run_transient_solver,
+)
+from backend.solvers.transient.time_stepper import (
+    FixedTimeStepper,
+    ImplicitEulerStepper,
+)
 from backend.solvers.transient.boundary_conditions.dirichlet import DirichletBC
+from backend.models.transient_model import ObservationPoint
 
 
 class DummyModel:
@@ -35,6 +42,10 @@ class DummyModel:
 
         # BC list
         self.boundary_conditions = []
+        self.observation_points = []
+
+    def get_recharge_field(self, _t):
+        return self.recharge
 
 
 def test_transient_diffusion():
@@ -59,14 +70,20 @@ def test_transient_diffusion():
     )
 
     # Solver setup
-    stepper = ImplicitEulerStepper()
-    solver = TransientSolver(model, stepper)
-
     t_start = 0.0
     t_end = 5000.0
     dt = 50.0
+    stepper = FixedTimeStepper(t_start, t_end, dt)
+    integrator = ImplicitEulerStepper()
+    solver = TransientSolver(model, stepper, integrator)
 
-    heads, logs = solver.run(t_start, t_end, dt)
+    # Track mid-domain observation
+    obs_cell = (nx // 2, 0)
+    model.observation_points = [
+        ObservationPoint(obs_cell[0], obs_cell[1], "mid", model.h0[obs_cell])
+    ]
+
+    heads, obs_data, logs = solver.run(t_start, t_end, dt)
 
     # --- Tests ---
 
@@ -84,4 +101,37 @@ def test_transient_diffusion():
     mid_series = heads[:, mid, 0]
     assert np.all(np.diff(mid_series) >= -1e-6)
 
+    obs = obs_data
+    assert obs["_times"].shape[0] == heads.shape[0]
+    assert "mid" in obs["head"]
+    assert np.allclose(obs["head"]["mid"], heads[:, mid, 0])
+    assert np.all(obs["drawdown"]["mid"] <= 0.0)
+
     print("\n=== TRANSIENT DIFFUSION TEST PASSED ===")
+
+
+def test_run_helper_observation_payload():
+    config = {
+        "nx": 2,
+        "ny": 2,
+        "dx": 1.0,
+        "dy": 1.0,
+        "dt": 10.0,
+        "steps": 2,
+        "T": 5.0,
+        "S": 0.2,
+        "initial_head": 10.0,
+        "recharge": 1e-6,
+        "observation_points": [{"name": "corner", "i": 0, "j": 0}],
+        "return_full_output": True,
+    }
+
+    result = run_transient_solver(config)
+    heads = result["heads"]
+    obs = result["observations"]
+
+    assert heads.shape[0] == len(obs["_times"])
+    assert "corner" in obs["head"]
+    assert obs["head"]["corner"].shape[0] == len(obs["_times"])
+    # Drawdown should remain small and non-positive relative to initial head
+    assert np.all(obs["drawdown"]["corner"] <= 0.0 + 1e-9)
